@@ -14,6 +14,7 @@ const (
 	// https://github.com/cosmos/chain-registry/blob/master/cosmoshub/chain.json
 	ChainId  = "cosmoshub-4"
 	GrpcAddr = "cosmos-grpc.polkachu.com:14990"
+	RpcAddr  = "https://cosmos-rpc.polkachu.com:443"
 	keyName  = "mykey"
 	// This is a test account on the cosmoshub with some uatom. You should use your own via an env variable such as `TestMnemonic := os.Getenv("MY_CLIENT_MNEMONIC")`
 	// https://dev.mintscan.io/cosmos/account/cosmos165smcg7d2fqtwewj3uf33rc33dh8h46yns3sm5
@@ -21,8 +22,38 @@ const (
 )
 
 func main() {
+	// UseGRCP()
+	UseRPC()
+}
+
+func UseRPC() {
+	w := SetupWalletSigner("", RpcAddr)
+
+	_, _, addr1 := testutildata.KeyTestPubAddr()
+
+	// Load our private keyring account from Mnemonic
+	_, acc := w.LoadKeyFromMnemonic("mykey", TestMnemonic, "1234567890")
+
+	// Create a bank send message from our account (acc) -> some other account address
+	msg1 := banktypes.NewMsgSend(acc, addr1, sdk.NewCoins(sdk.NewInt64Coin("uatom", 1)))
+	if err := w.TxBuilder.SetMsgs(msg1); err != nil {
+		panic(err)
+	}
+
+	// Set the transaction information (do before signing the Tx)
+	w.TxBuilder.SetGasLimit(100_000)
+	w.TxBuilder.SetMemo("my test memo")
+	w.TxBuilder.SetFeeAmount(sdk.NewCoins(sdk.NewInt64Coin("uatom", 750)))
+
+	// Signs the transaction
+	if err := w.SignTx(keyName); err != nil {
+		panic(err)
+	}
+}
+
+func UseGRCP() {
 	// Setup the wallet signer basics and close the gRPC connection after the main function exits.
-	w := SetupWalletSigner(GrpcAddr)
+	w := SetupWalletSigner(GrpcAddr, "")
 	defer w.GrpcConn.Close()
 
 	// random account
@@ -61,7 +92,6 @@ func main() {
 	}
 
 	fmt.Printf("txRes: %+v\n", txRes)
-
 }
 
 func (w *WalletSigner) pollForTxHash(txhash string) (sdk.TxResponse, error) {

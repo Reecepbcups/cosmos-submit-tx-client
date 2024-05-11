@@ -1,6 +1,6 @@
 # cosmos-submit-tx-client
 
-execute `go run *.go` to run. Make sure to change the source to use your own mnemonic, chain-id, and gRPC endpoint.
+execute `go run *.go` to run. Make sure to change the source to use your own mnemonic, chain-id, and RPC or gRPC endpoint.
 
 ## Example
 

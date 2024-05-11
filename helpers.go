@@ -1,11 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	httpclient "net/http"
 
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/crypto/hd"
@@ -21,6 +20,8 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/params"
 	"github.com/cosmos/cosmos-sdk/x/slashing"
 	"github.com/cosmos/cosmos-sdk/x/staking"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	cosmostx "cosmossdk.io/api/cosmos/tx/v1beta1"
 	signing "github.com/cosmos/cosmos-sdk/types/tx/signing"
@@ -34,12 +35,18 @@ type WalletSigner struct {
 	TxBuilder client.TxBuilder
 	EncCfg    moduletestutil.TestEncodingConfig
 	Keyring   keyring.Keyring
-	GrpcConn  *grpc.ClientConn
+
+	GrpcConn *grpc.ClientConn
+	RPCAddr  string
 }
 
 // SetupWalletSigner sets up the wallet signer basics and returns a pointer to
 // the WalletSigner struct.
+// TODO: a factory would be better
 func SetupWalletSigner(gRPCAddr string) *WalletSigner {
+	var grpcConn *grpc.ClientConn
+	var err error
+
 	// To sign a transaction, the AppModuleBasic must be provided here. This
 	// is for the protobuf (so we can encode/decode the transaction bytes)
 	encCfg := moduletestutil.MakeTestEncodingConfig(
@@ -53,13 +60,15 @@ func SetupWalletSigner(gRPCAddr string) *WalletSigner {
 		consensus.AppModuleBasic{},
 	)
 
-	// Setup a gRPC connection
-	grpcConn, err := grpc.Dial(
-		gRPCAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		panic(err)
+	// Setup a gRPC connection, else will use RPC
+	if gRPCAddr != "" {
+		grpcConn, err = grpc.Dial(
+			gRPCAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	// Setup a struct to share data with helper methods.
@@ -79,6 +88,10 @@ func SetupWalletSigner(gRPCAddr string) *WalletSigner {
 // ResetTxBuilder resets the TxBuilder to a new TxBuilder.
 func (w *WalletSigner) ResetTxBuilder() {
 	w.TxBuilder = w.EncCfg.TxConfig.NewTxBuilder()
+}
+
+func (w *WalletSigner) SetRPCAddr(r string) {
+	w.RPCAddr = r
 }
 
 // LoadKeyFromMnemonic loads a key from a mnemonic and returns the keyring record and the address.
@@ -117,7 +130,7 @@ func (w *WalletSigner) GetAccountInfo(addr sdk.AccAddress) (authtypes.BaseAccoun
 	return acc, nil
 }
 
-func (w *WalletSigner) BroadcastTx() *cosmostx.BroadcastTxResponse {
+func (w *WalletSigner) BroadcastTx() *sdk.TxResponse {
 	// Generated Protobuf-encoded bytes.
 	txBytes, err := w.EncCfg.TxConfig.TxEncoder()(w.TxBuilder.GetTx())
 	if err != nil {
@@ -131,20 +144,62 @@ func (w *WalletSigner) BroadcastTx() *cosmostx.BroadcastTxResponse {
 	}
 	fmt.Println("txBytesJson", string(txBytesJson))
 
-	// Submit the Tx to the gRPC server
-	txClient := cosmostx.NewServiceClient(w.GrpcConn)
-	grpcRes, err := txClient.BroadcastTx(
-		w.Ctx,
-		&cosmostx.BroadcastTxRequest{
-			Mode:    cosmostx.BroadcastMode_BROADCAST_MODE_SYNC,
-			TxBytes: txBytes,
-		},
-	)
-	if err != nil {
-		panic(err)
+	var res *sdk.TxResponse
+
+	if w.GrpcConn != nil {
+		// Submit the Tx to the gRPC server
+		txClient := cosmostx.NewServiceClient(w.GrpcConn)
+		grpcRes, err := txClient.BroadcastTx(
+			w.Ctx,
+			&cosmostx.BroadcastTxRequest{
+				Mode:    cosmostx.BroadcastMode_BROADCAST_MODE_SYNC,
+				TxBytes: txBytes,
+			},
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		res = grpcRes.TxResponse
+	} else {
+		// create an http post req
+		req, err := httpclient.NewRequest("POST", w.RPCAddr+"/cosmos/tx/v1beta1/txs", bytes.NewBuffer(txBytes))
+		if err != nil {
+			panic(err)
+		}
+		defer req.Body.Close()
+
+		// set the headers
+		req.Header.Set("Content-Type", "application/json")
+
+		// create a new http client
+		client := httpclient.Client{}
+
+		// send the request
+		resp, err := client.Do(req)
+		if err != nil {
+			panic(err)
+		}
+		defer resp.Body.Close()
+
+		var bz []byte
+		_, err = resp.Body.Read(bz)
+		if err != nil {
+			panic(err)
+		}
+
+		clientCtx := context.Background()
+		// convert to an sdk context
+		sdkCtx := sdk.FromGoContext(clientCtx)
+
+		// decode the response
+		res = &cosmostx.BroadcastTxResponse{}
+
+		cosmostx.ServiceServer.BroadcastTx()
+
 	}
 
-	return grpcRes
+	return res
 }
 
 func (w *WalletSigner) SignTx(keyName string) error {
