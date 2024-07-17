@@ -6,15 +6,16 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	"github.com/cosmos/cosmos-sdk/client"
-	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/cosmos-sdk/crypto/hd"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	moduletestutil "github.com/cosmos/cosmos-sdk/types/module/testutil"
 	"github.com/cosmos/cosmos-sdk/x/auth"
+	xauthsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"github.com/cosmos/cosmos-sdk/x/bank"
 	"github.com/cosmos/cosmos-sdk/x/consensus"
@@ -23,10 +24,12 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/slashing"
 	"github.com/cosmos/cosmos-sdk/x/staking"
 
+	signingv1beta1 "cosmossdk.io/api/cosmos/tx/signing/v1beta1"
 	cosmostx "cosmossdk.io/api/cosmos/tx/v1beta1"
+	txv1beta1 "cosmossdk.io/api/cosmos/tx/v1beta1"
 	txsigning "cosmossdk.io/x/tx/signing"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	signing "github.com/cosmos/cosmos-sdk/types/tx/signing"
-	authsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
 )
 
 // WalletSigner is a struct that holds the basics for signing a transaction.
@@ -153,13 +156,11 @@ func (w *WalletSigner) SignTx(keyName string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("full key: %+v\n", k)
 
 	krAcc, err := k.GetAddress()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("krAcc: %+v\n", krAcc.String())
 
 	pubKey, err := k.GetPubKey()
 	if err != nil {
@@ -171,8 +172,6 @@ func (w *WalletSigner) SignTx(keyName string) error {
 	if err != nil {
 		return err
 	}
-	// print acc
-	fmt.Printf("acc: %+v\n", acc)
 
 	// Get the base Tx bytes
 	txBytes, err := w.EncCfg.TxConfig.TxEncoder()(w.TxBuilder.GetTx())
@@ -180,7 +179,10 @@ func (w *WalletSigner) SignTx(keyName string) error {
 		return err
 	}
 
-	defaultSignMode := signing.SignMode_SIGN_MODE_DIRECT
+	defaultSignMode, err := xauthsigning.APISignModeToInternal(w.EncCfg.TxConfig.SignModeHandler().DefaultMode())
+	if err != nil {
+		return err
+	}
 
 	// First round: we gather all the signer infos. We use the "set empty
 	// signature" hack to do that.
@@ -204,83 +206,80 @@ func (w *WalletSigner) SignTx(keyName string) error {
 	if err != nil {
 		return err
 	}
+	anyPubKey := &anypb.Any{
+		TypeUrl: anyPk.TypeUrl,
+		Value:   anyPk.Value,
+	}
 
-	// cast pubKey to anypb.Any
+	// Second round: all signer infos are set, so each signer can sign.
 	signerData := txsigning.SignerData{
 		Address:       krAcc.String(),
 		ChainID:       ChainId,
 		AccountNumber: acc.AccountNumber,
 		Sequence:      acc.Sequence,
-		PubKey: &anypb.Any{
-			TypeUrl: anyPk.TypeUrl,
-			Value:   anyPk.Value,
+		PubKey:        anyPubKey,
+	}
+
+	// WHY?
+	memo := "sometestmemo"
+	signerInfo := []*txv1beta1.SignerInfo{
+		{
+			PublicKey: anyPubKey,
+			ModeInfo: &txv1beta1.ModeInfo{
+				Sum: &txv1beta1.ModeInfo_Single_{
+					Single: &txv1beta1.ModeInfo_Single{
+						Mode: signingv1beta1.SignMode_SIGN_MODE_DIRECT,
+					},
+				},
+			},
+			Sequence: acc.Sequence,
 		},
 	}
 
-	// var sigV2 signing.SignatureV2
+	authInfo := &txv1beta1.AuthInfo{
+		Fee:         &txv1beta1.Fee{},
+		SignerInfos: signerInfo,
+	}
+
+	txBody := &txv1beta1.TxBody{
+		Messages: []*anypb.Any{},
+		Memo:     memo,
+	}
+	bodyBz, _ := proto.Marshal(txBody)
+	authInfoBz, _ := proto.Marshal(authInfo)
+
+	txData := txsigning.TxData{
+		Body:                       txBody,
+		AuthInfo:                   authInfo,
+		BodyBytes:                  bodyBz,
+		AuthInfoBytes:              authInfoBz,
+		BodyHasUnknownNonCriticals: false,
+	}
 
 	// Generate the bytes to be signed.
-	// signModeHandler := w.EncCfg.TxConfig.SignModeHandler().DefaultMode()
-
-	// tx := w.TxBuilder.GetTx()
-
-	// anyMsgs[j] = &anypb.Any{
-	// TypeUrl: legacyAny.TypeUrl,
-	// Value:   legacyAny.Value,
-	// }
-
-	builtTx := w.TxBuilder.GetTx()
-	adaptableTx, ok := builtTx.(authsigning.V2AdaptableTx)
-	if !ok {
-		return fmt.Errorf("expected Tx to be signing.V2AdaptableTx, got %T", builtTx)
-	}
-	txData := adaptableTx.GetSigningTxData()
-
-	sig, pubKey, err := w.Keyring.Sign(keyName, txData.BodyBytes, defaultSignMode)
+	signModeHandler := w.EncCfg.TxConfig.SignModeHandler().DefaultMode()
+	signBytes, err := w.EncCfg.TxConfig.SignModeHandler().GetSignBytes(w.Ctx, signModeHandler, signerData, txData)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("sig: %+v\n", sig)
+
+	sig, pubKey, err := w.Keyring.Sign(keyName, signBytes, defaultSignMode)
+	if err != nil {
+		return err
+	}
+
+	// Construct the SignatureV2 struct
+	sigData := signing.SingleSignatureData{
+		SignMode:  defaultSignMode,
+		Signature: sig,
+	}
 
 	sigV2 := signing.SignatureV2{
-		PubKey: pubKey,
-		Data: &signing.SingleSignatureData{
-			SignMode:  defaultSignMode,
-			Signature: sig,
-		},
+		PubKey:   pubKey,
+		Data:     &sigData,
 		Sequence: signerData.Sequence,
 	}
 
-	/*
-		// old version
-		signingTxData := txsigning.TxData{
-			BodyBytes: outBz,
-		}
-
-		signBytes, err := w.EncCfg.TxConfig.SignModeHandler().GetSignBytes(w.Ctx, signModeHandler, signerData, signingTxData)
-		if err != nil {
-			return err
-		}
-
-		sig, pubKey, err := w.Keyring.Sign(keyName, signBytes, defaultSignMode)
-		if err != nil {
-			return err
-		}
-
-		// Construct the SignatureV2 struct
-		sigV2 = signing.SignatureV2{
-			PubKey: pubKey,
-			Data: &signing.SingleSignatureData{
-				SignMode:  defaultSignMode,
-				Signature: sig,
-			},
-			Sequence: signerData.Sequence,
-		}
-
-		if err := w.TxBuilder.SetSignatures(sigV2); err != nil {
-			panic(err)
-		}
-	*/
 	if err := w.TxBuilder.SetSignatures(sigV2); err != nil {
 		panic(err)
 	}
