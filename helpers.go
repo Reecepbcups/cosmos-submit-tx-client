@@ -153,6 +153,10 @@ func (w *WalletSigner) BroadcastTx() *cosmostx.BroadcastTxResponse {
 }
 
 func (w *WalletSigner) SignTx(keyName string) error {
+	protoTxCfg := authtx.NewTxConfig(codec.NewProtoCodec(w.EncCfg.InterfaceRegistry), authtx.DefaultSignModes)
+	signModeHandler := protoTxCfg.SignModeHandler().DefaultMode()
+	signMode := oldtxsigning.SignMode(signModeHandler)
+
 	k, err := w.Keyring.Key(keyName)
 	if err != nil {
 		return err
@@ -168,99 +172,44 @@ func (w *WalletSigner) SignTx(keyName string) error {
 		return err
 	}
 
-	// BaseAccount chain info
+	// requires chain connection (gRPC). You could also just hardcode this
 	acc, err := w.GetAccountInfo(krAcc)
 	if err != nil {
 		return err
 	}
+	accSeq := acc.Sequence
+	accNum := acc.AccountNumber
 
-	// Get the base Tx bytes
-	txBytes, err := w.EncCfg.TxConfig.TxEncoder()(w.TxBuilder.GetTx())
-	if err != nil {
-		return err
-	}
-
-	protoTxCfg := authtx.NewTxConfig(codec.NewProtoCodec(w.EncCfg.InterfaceRegistry), authtx.DefaultSignModes)
-
-	// fee := w.TxBuilder.GetTx().GetFee()
-
-	signMode := protoTxCfg.SignModeHandler().DefaultMode()
-	// 1st round: set SignatureV2 with empty signatures, to set correct
-	// signer infos.
-	// sig := oldtxsigning.SignatureV2{
-	// 	PubKey: pubKey,
-	// 	Data: &oldtxsigning.SingleSignatureData{
-	// 		SignMode:  oldtxsigning.SignMode(signMode),
-	// 		Signature: nil,
-	// 	},
-	// 	Sequence: acc.Sequence,
-	// }
-
-	// First round: we gather all the signer infos. We use the "set empty
-	// signature" hack to do that.
+	// First round: we gather all the signer infos. We use the "set empty signature" hack to do that.
 	if err := w.TxBuilder.SetSignatures(oldtxsigning.SignatureV2{
 		PubKey: pubKey,
 		Data: &oldtxsigning.SingleSignatureData{
-			SignMode:  oldtxsigning.SignMode(signMode),
+			SignMode:  signMode,
 			Signature: nil,
 		},
-		Sequence: acc.Sequence, // get sequence from query
+		Sequence: accSeq,
 	}); err != nil {
 		panic(err)
 	}
+	signerData := SignerData(pubKey, accNum, accSeq)
 
-	anyPubKey, err := PubKeyToAny(pubKey)
+	// 2nd round: with all signer infos set, signer can sign really.
+	txData := TxSigningData(w.TxBuilder.GetTx())
+	signBz, err := protoTxCfg.SignModeHandler().GetSignBytes(w.Ctx, signModeHandler, signerData, txData)
 	if err != nil {
 		return err
 	}
 
-	// 2nd round: once all signer infos are set, every signer can sign.
-	signerData := txsigning.SignerData{
-		ChainID:       ChainId,
-		AccountNumber: acc.AccountNumber,
-		Sequence:      acc.Sequence,
-		PubKey:        anyPubKey,
-	}
-
-	theTx := w.TxBuilder.GetTx()
-	adaptableTx, ok := theTx.(authsigning.V2AdaptableTx)
-	if !ok {
-		return fmt.Errorf("%T does not implement the authsigning.V2AdaptableTx interface", theTx)
-	}
-	txData := adaptableTx.GetSigningTxData()
-
-	// sign with the keyring
-	// txBytes, err := protoTxCfg.TxEncoder()(theTx)
-	// if err != nil {
-	// 	return err
-	// }
-
-	// print txBytes
-	fmt.Println("txBytes", string(txBytes))
-
-	_, _, err = w.Keyring.Sign(keyName, txBytes, oldtxsigning.SignMode_SIGN_MODE_DIRECT)
+	sigBz, _, err := w.Keyring.Sign(keyName, signBz, oldtxsigning.SignMode_SIGN_MODE_DIRECT)
 	if err != nil {
 		return err
 	}
-	// sig.Data.(*oldtxsigning.SingleSignatureData).Signature = sigBytesfirst
-
-	signBytes, err := protoTxCfg.SignModeHandler().GetSignBytes(w.Ctx, signMode, signerData, txData)
-	if err != nil {
-		return err
-	}
-
-	// sign with the keyring
-	sigBytes, _, err := w.Keyring.Sign(keyName, signBytes, oldtxsigning.SignMode_SIGN_MODE_DIRECT)
-	if err != nil {
-		return err
-	}
-	// sig.Data.(*sdksigning.SingleSignatureData).Signature = sigBytes
 
 	if err = w.TxBuilder.SetSignatures(oldtxsigning.SignatureV2{
 		PubKey: pubKey,
 		Data: &sdksigning.SingleSignatureData{
 			SignMode:  sdksigning.SignMode(signMode),
-			Signature: sigBytes,
+			Signature: sigBz,
 		},
 		Sequence: acc.Sequence,
 	}); err != nil {
@@ -268,6 +217,29 @@ func (w *WalletSigner) SignTx(keyName string) error {
 	}
 
 	return nil
+}
+
+func SignerData(pubKey cryptotypes.PubKey, accNum, accSeq uint64) txsigning.SignerData {
+	anyPubKey, err := PubKeyToAny(pubKey)
+	if err != nil {
+		panic(err)
+	}
+
+	return txsigning.SignerData{
+		ChainID:       ChainId,
+		AccountNumber: accNum,
+		Sequence:      accSeq,
+		PubKey:        anyPubKey,
+	}
+}
+
+func TxSigningData(tx authsigning.Tx) txsigning.TxData {
+	adaptableTx, ok := tx.(authsigning.V2AdaptableTx)
+	if !ok {
+		panic(fmt.Sprintf("%T does not implement the authsigning.V2AdaptableTx interface", tx))
+	}
+
+	return adaptableTx.GetSigningTxData()
 }
 
 func PubKeyToAny(pubKey cryptotypes.PubKey) (*anypb.Any, error) {

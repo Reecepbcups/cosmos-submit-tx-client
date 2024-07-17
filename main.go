@@ -11,14 +11,12 @@ import (
 )
 
 const (
-	// https://github.com/cosmos/chain-registry/blob/master/cosmoshub/chain.json
+	// SDK v50: github.com/strangelove-ventures/poa
+	// BINARY="poad" CHAIN_ID="local-1" HOME_DIR="$HOME/.poad" TIMEOUT_COMMIT="3200ms" CLEAN=true sh test_node.sh^C
 	ChainId  = "local-1"
 	GrpcAddr = "0.0.0.0:9090"
 	keyName  = "myv50key"
 	Denom    = "utest" // uatom
-	// This is a test account on the cosmoshub with some uatom. You should use your own via an env variable such as `TestMnemonic := os.Getenv("MY_CLIENT_MNEMONIC")`
-	// https://dev.mintscan.io/cosmos/account/cosmos165smcg7d2fqtwewj3uf33rc33dh8h46yns3sm5
-
 	// cosmos12jz2v5psq5hu4px9ld23uztzek8y0xmzdxuheh
 	TestMnemonic = "decorate bright ozone fork gallery riot bus exhaust worth way bone indoor calm squirrel merry zero scheme cotton until shop any excess stage laundry"
 )
