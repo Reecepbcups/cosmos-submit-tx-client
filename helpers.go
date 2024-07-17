@@ -6,8 +6,10 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/anypb"
 
 	"github.com/cosmos/cosmos-sdk/client"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/cosmos-sdk/crypto/hd"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -15,7 +17,6 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/auth"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"github.com/cosmos/cosmos-sdk/x/bank"
-	"github.com/cosmos/cosmos-sdk/x/capability"
 	"github.com/cosmos/cosmos-sdk/x/consensus"
 	"github.com/cosmos/cosmos-sdk/x/mint"
 	"github.com/cosmos/cosmos-sdk/x/params"
@@ -23,8 +24,9 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/staking"
 
 	cosmostx "cosmossdk.io/api/cosmos/tx/v1beta1"
+	txsigning "cosmossdk.io/x/tx/signing"
 	signing "github.com/cosmos/cosmos-sdk/types/tx/signing"
-	xauthsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
+	authsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
 )
 
 // WalletSigner is a struct that holds the basics for signing a transaction.
@@ -45,7 +47,6 @@ func SetupWalletSigner(gRPCAddr string) *WalletSigner {
 	encCfg := moduletestutil.MakeTestEncodingConfig(
 		auth.AppModuleBasic{},
 		bank.AppModuleBasic{},
-		capability.AppModuleBasic{},
 		staking.AppModuleBasic{},
 		mint.AppModuleBasic{},
 		params.AppModuleBasic{},
@@ -152,11 +153,13 @@ func (w *WalletSigner) SignTx(keyName string) error {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("full key: %+v\n", k)
 
 	krAcc, err := k.GetAddress()
 	if err != nil {
 		return err
 	}
+	fmt.Printf("krAcc: %+v\n", krAcc.String())
 
 	pubKey, err := k.GetPubKey()
 	if err != nil {
@@ -168,6 +171,8 @@ func (w *WalletSigner) SignTx(keyName string) error {
 	if err != nil {
 		return err
 	}
+	// print acc
+	fmt.Printf("acc: %+v\n", acc)
 
 	// Get the base Tx bytes
 	txBytes, err := w.EncCfg.TxConfig.TxEncoder()(w.TxBuilder.GetTx())
@@ -175,12 +180,14 @@ func (w *WalletSigner) SignTx(keyName string) error {
 		return err
 	}
 
+	defaultSignMode := signing.SignMode_SIGN_MODE_DIRECT
+
 	// First round: we gather all the signer infos. We use the "set empty
 	// signature" hack to do that.
 	if err := w.TxBuilder.SetSignatures(signing.SignatureV2{
 		PubKey: pubKey,
 		Data: &signing.SingleSignatureData{
-			SignMode:  w.EncCfg.TxConfig.SignModeHandler().DefaultMode(),
+			SignMode:  defaultSignMode,
 			Signature: nil,
 		},
 		Sequence: acc.Sequence, // get sequence from query
@@ -188,46 +195,92 @@ func (w *WalletSigner) SignTx(keyName string) error {
 		panic(err)
 	}
 
-	_, _, err = w.Keyring.Sign(keyName, txBytes)
+	_, _, err = w.Keyring.Sign(keyName, txBytes, defaultSignMode)
 	if err != nil {
 		panic(err)
 	}
 
-	// Second round: all signer infos are set, so each signer can sign.
-	signerData := xauthsigning.SignerData{
+	anyPk, err := codectypes.NewAnyWithValue(pubKey)
+	if err != nil {
+		return err
+	}
+
+	// cast pubKey to anypb.Any
+	signerData := txsigning.SignerData{
 		Address:       krAcc.String(),
 		ChainID:       ChainId,
 		AccountNumber: acc.AccountNumber,
 		Sequence:      acc.Sequence,
-		PubKey:        pubKey,
+		PubKey: &anypb.Any{
+			TypeUrl: anyPk.TypeUrl,
+			Value:   anyPk.Value,
+		},
 	}
 
-	var sigV2 signing.SignatureV2
+	// var sigV2 signing.SignatureV2
 
 	// Generate the bytes to be signed.
-	signMode := w.EncCfg.TxConfig.SignModeHandler().DefaultMode()
-	signBytes, err := w.EncCfg.TxConfig.SignModeHandler().GetSignBytes(signMode, signerData, w.TxBuilder.GetTx())
+	// signModeHandler := w.EncCfg.TxConfig.SignModeHandler().DefaultMode()
+
+	// tx := w.TxBuilder.GetTx()
+
+	// anyMsgs[j] = &anypb.Any{
+	// TypeUrl: legacyAny.TypeUrl,
+	// Value:   legacyAny.Value,
+	// }
+
+	builtTx := w.TxBuilder.GetTx()
+	adaptableTx, ok := builtTx.(authsigning.V2AdaptableTx)
+	if !ok {
+		return fmt.Errorf("expected Tx to be signing.V2AdaptableTx, got %T", builtTx)
+	}
+	txData := adaptableTx.GetSigningTxData()
+
+	sig, pubKey, err := w.Keyring.Sign(keyName, txData.BodyBytes, defaultSignMode)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("sig: %+v\n", sig)
 
-	sig, pubKey, err := w.Keyring.Sign(keyName, signBytes)
-	if err != nil {
-		return err
-	}
-
-	// Construct the SignatureV2 struct
-	sigData := signing.SingleSignatureData{
-		SignMode:  signMode,
-		Signature: sig,
-	}
-
-	sigV2 = signing.SignatureV2{
-		PubKey:   pubKey,
-		Data:     &sigData,
+	sigV2 := signing.SignatureV2{
+		PubKey: pubKey,
+		Data: &signing.SingleSignatureData{
+			SignMode:  defaultSignMode,
+			Signature: sig,
+		},
 		Sequence: signerData.Sequence,
 	}
 
+	/*
+		// old version
+		signingTxData := txsigning.TxData{
+			BodyBytes: outBz,
+		}
+
+		signBytes, err := w.EncCfg.TxConfig.SignModeHandler().GetSignBytes(w.Ctx, signModeHandler, signerData, signingTxData)
+		if err != nil {
+			return err
+		}
+
+		sig, pubKey, err := w.Keyring.Sign(keyName, signBytes, defaultSignMode)
+		if err != nil {
+			return err
+		}
+
+		// Construct the SignatureV2 struct
+		sigV2 = signing.SignatureV2{
+			PubKey: pubKey,
+			Data: &signing.SingleSignatureData{
+				SignMode:  defaultSignMode,
+				Signature: sig,
+			},
+			Sequence: signerData.Sequence,
+		}
+
+		if err := w.TxBuilder.SetSignatures(sigV2); err != nil {
+			panic(err)
+		}
+	*/
 	if err := w.TxBuilder.SetSignatures(sigV2); err != nil {
 		panic(err)
 	}

@@ -2,6 +2,13 @@
 
 execute `go run *.go` to run. Make sure to change the source to use your own mnemonic, chain-id, and gRPC endpoint.
 
+## Versions
+
+| SDK | Branch |
+| -------- | ------- |
+| v0.50 | [main (here)](https://github.com/Reecepbcups/cosmos-submit-tx-client/tree/main) |
+| v0.47 | [sdk-v47](https://github.com/Reecepbcups/cosmos-submit-tx-client/tree/sdk-v47) |
+
 ## Example
 
 ```

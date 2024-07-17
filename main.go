@@ -12,12 +12,15 @@ import (
 
 const (
 	// https://github.com/cosmos/chain-registry/blob/master/cosmoshub/chain.json
-	ChainId  = "cosmoshub-4"
-	GrpcAddr = "cosmos-grpc.polkachu.com:14990"
-	keyName  = "mykey"
+	ChainId  = "local-1"
+	GrpcAddr = "0.0.0.0:9090"
+	keyName  = "myv50key"
+	Denom    = "utest" // uatom
 	// This is a test account on the cosmoshub with some uatom. You should use your own via an env variable such as `TestMnemonic := os.Getenv("MY_CLIENT_MNEMONIC")`
 	// https://dev.mintscan.io/cosmos/account/cosmos165smcg7d2fqtwewj3uf33rc33dh8h46yns3sm5
-	TestMnemonic = "pencil surprise brave age old level saddle because olive find winter auto develop spin milk tunnel make demand tattoo wasp primary save bubble keep"
+
+	// cosmos12jz2v5psq5hu4px9ld23uztzek8y0xmzdxuheh
+	TestMnemonic = "decorate bright ozone fork gallery riot bus exhaust worth way bone indoor calm squirrel merry zero scheme cotton until shop any excess stage laundry"
 )
 
 func main() {
@@ -30,10 +33,10 @@ func main() {
 	_, _, addr1 := testutildata.KeyTestPubAddr()
 
 	// Load our private keyring account from Mnemonic
-	_, acc := w.LoadKeyFromMnemonic("mykey", TestMnemonic, "1234567890")
+	_, acc := w.LoadKeyFromMnemonic(keyName, TestMnemonic, "1234567890")
 
 	// Create a bank send message from our account (acc) -> some other account address
-	msg1 := banktypes.NewMsgSend(acc, addr1, sdk.NewCoins(sdk.NewInt64Coin("uatom", 1)))
+	msg1 := banktypes.NewMsgSend(acc, addr1, sdk.NewCoins(sdk.NewInt64Coin(Denom, 1)))
 	if err := w.TxBuilder.SetMsgs(msg1); err != nil {
 		panic(err)
 	}
@@ -41,7 +44,7 @@ func main() {
 	// Set the transaction information (do before signing the Tx)
 	w.TxBuilder.SetGasLimit(100_000)
 	w.TxBuilder.SetMemo("my test memo")
-	w.TxBuilder.SetFeeAmount(sdk.NewCoins(sdk.NewInt64Coin("uatom", 750)))
+	w.TxBuilder.SetFeeAmount(sdk.NewCoins(sdk.NewInt64Coin(Denom, 750)))
 
 	// Signs the transaction
 	if err := w.SignTx(keyName); err != nil {
@@ -52,10 +55,14 @@ func main() {
 	broadcastRes := w.BroadcastTx()
 	fmt.Printf("broadcastRes: %+v\n", broadcastRes)
 
+	if broadcastRes.TxResponse.Code != 0 {
+		panic(fmt.Errorf("tx failed: %s", broadcastRes.TxResponse.RawLog))
+	}
+
 	// Only `broadcastRes.TxResponse.Txhash` and `broadcastRes.TxResponse.RawLog` are returned.
 	// If rawlog is filled with anything other than '[]', your transaction was not accepted into the chain at all. Re-submit with the required fix.
 	// if only Txhash is set, query the TxHash every second until some data comes back. This is not elegant, but it is required :(
-	txRes, err := w.pollForTxHash(broadcastRes.TxResponse.Txhash)
+	txRes, err := w.PollForTxHash(broadcastRes.TxResponse.Txhash)
 	if err != nil {
 		panic(err)
 	}
@@ -64,7 +71,7 @@ func main() {
 
 }
 
-func (w *WalletSigner) pollForTxHash(txhash string) (sdk.TxResponse, error) {
+func (w *WalletSigner) PollForTxHash(txhash string) (sdk.TxResponse, error) {
 	resp := sdk.TxResponse{}
 
 	sc := cosmostx.NewServiceClient(w.GrpcConn)
